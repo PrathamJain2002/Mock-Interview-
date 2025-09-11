@@ -6,12 +6,116 @@ const router = express.Router();
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama2';
 
+// Helper function to create formatted Q&A section for the prompt
+function createQASection(questions: any[], answers: any[]): string {
+  let qaText = '';
+  
+  questions.forEach((question, index) => {
+    qaText += `\nQuestion ${index + 1}: ${question.question}\n`;
+    qaText += `Type: ${question.type || 'General'}\n`;
+    
+    // Find corresponding answer
+    const answer = answers.find(ans => ans.questionIndex === index);
+    if (answer) {
+      qaText += `Answer: ${answer.answer}\n`;
+      qaText += `Answer Length: ${answer.answer.split(' ').length} words\n`;
+    } else {
+      qaText += `Answer: [No answer provided]\n`;
+    }
+    qaText += `---\n`;
+  });
+  
+  return qaText;
+}
+
 // POST /api/performance/analyze
 router.post('/analyze', async (req: Request, res: Response) => {
   try {
     const { questions, answers, jobDetails } = req.body;
 
-    const prompt = `Analyze interview performance for ${jobDetails.title} position at ${jobDetails.company}. Job requirements: ${jobDetails.requirements}. Questions answered: ${answers.length}/${questions.length}. Provide scores and feedback in JSON format with overallScore, technicalScore, behavioralScore, communicationScore, strengths array, weaknesses array, and suggestions array.`;
+    // Create detailed Q&A section for the prompt
+    const qaSection = createQASection(questions, answers);
+    
+    const prompt = `Analyze interview performance for ${jobDetails.title} position at ${jobDetails.company}. 
+
+Job Requirements: ${jobDetails.requirements}
+
+Interview Questions and Answers:
+${qaSection}
+
+Questions answered: ${answers.length}/${questions.length}
+
+You are an expert interviewer analyzing interview performance. CRITICALLY evaluate each answer for relevance, substance, and quality. Generate ONLY valid JSON with this exact structure:
+
+{
+  "overallScore": 75,
+  "technicalScore": 80,
+  "behavioralScore": 70,
+  "communicationScore": 75,
+  "strengths": ["Good technical knowledge", "Clear communication"],
+  "weaknesses": ["Could provide more details", "Needs specific examples"],
+  "suggestions": ["Practice technical questions", "Use STAR method"],
+  "detailedFeedback": {
+    "question1": "Good technical knowledge demonstrated",
+    "question2": "Could provide more specific examples"
+  }
+}
+
+STRICT SCORING RULES - BE HARSH WITH POOR ANSWERS:
+
+FOR IRRELEVANT/NONSENSICAL ANSWERS (like "yup", "tyu", "cyu", "opo", "bji"):
+- overallScore: 5-15 (NEVER above 20)
+- technicalScore: 0-10 (NEVER above 15)
+- behavioralScore: 0-10 (NEVER above 15)
+- communicationScore: 5-15 (NEVER above 20)
+
+FOR VERY SHORT/INSUFFICIENT ANSWERS (under 20 words, no substance):
+- overallScore: 10-25 (NEVER above 30)
+- technicalScore: 5-20 (NEVER above 25)
+- behavioralScore: 5-20 (NEVER above 25)
+- communicationScore: 10-25 (NEVER above 30)
+
+FOR MEDIOCRE ANSWERS (some content but lacks depth):
+- overallScore: 30-60
+- technicalScore: 25-60
+- behavioralScore: 25-60
+- communicationScore: 30-60
+
+FOR GOOD ANSWERS (relevant, detailed, specific):
+- overallScore: 70-90
+- technicalScore: 70-90
+- behavioralScore: 70-90
+- communicationScore: 70-90
+
+FOR EXCELLENT ANSWERS (comprehensive, specific examples, clear structure):
+- overallScore: 85-100
+- technicalScore: 85-100
+- behavioralScore: 85-100
+- communicationScore: 85-100
+
+MANDATORY PENALTIES:
+- Single word answers: MAX 15 points total
+- Nonsensical responses: MAX 20 points total
+- Irrelevant responses: MAX 25 points total
+- No technical content for technical questions: technicalScore MAX 20
+- No examples for behavioral questions: behavioralScore MAX 25
+- Unclear communication: communicationScore MAX 30
+
+REQUIRED REWARDS:
+- Specific technical examples: +20-30 points
+- Detailed problem-solving scenarios: +20-30 points
+- Clear, structured responses: +15-25 points
+- Relevant work experience: +15-25 points
+- STAR method usage: +10-20 points
+
+CRITICAL: Return ONLY the JSON object. Be extremely strict - poor answers MUST get low scores!
+
+Focus on:
+1. Technical knowledge and skills demonstrated
+2. Problem-solving approach and examples
+3. Communication clarity and structure
+4. Relevance to the job requirements
+5. Specific strengths and areas for improvement`;
 
     const response = await fetch(`${OLLAMA_URL}/api/generate`, {
       method: 'POST',
@@ -20,11 +124,11 @@ router.post('/analyze', async (req: Request, res: Response) => {
       },
       body: JSON.stringify({
         model: OLLAMA_MODEL,
-        prompt: `You are an expert HR interviewer analyzing interview performance. Provide detailed feedback and scores. ${prompt}`,
+        prompt: `You are an expert HR interviewer and technical recruiter with 10+ years of experience. Analyze the interview performance and provide detailed, constructive feedback. ${prompt}`,
         stream: false,
         options: {
           temperature: 0.7,
-          num_predict: 600
+          num_predict: 1000
         }
       })
     });
@@ -62,23 +166,167 @@ function extractAnalysisFromAI(data: any, questions: any[], answers: any[], jobD
     const generatedText = data.response || '';
     console.log('Generated text:', generatedText);
     
-    // Look for JSON object in the response
-    const jsonMatch = generatedText.match(/\{[\s\S]*\}/);
+    // Try multiple JSON extraction methods
+    let analysis = null;
+    
+    // Method 1: Look for complete JSON object (more specific pattern)
+    const jsonMatch = generatedText.match(/\{\s*"overallScore"[\s\S]*?\}/);
     if (jsonMatch) {
       console.log('Found JSON match:', jsonMatch[0]);
-      const analysis = JSON.parse(jsonMatch[0]);
-      if (analysis.overallScore !== undefined) {
+      try {
+        analysis = JSON.parse(jsonMatch[0]);
+      } catch (parseError) {
+        console.log('JSON parse failed, trying to fix common issues...');
+        // Try to fix common JSON issues
+        let fixedJson = jsonMatch[0]
+          .replace(/,(\s*[}\]])/g, '$1') // Remove trailing commas
+          .replace(/([^\\])\\([^\\])/g, '$1\\\\$2') // Fix backslashes
+          .replace(/(\w+):/g, '"$1":') // Quote unquoted keys
+          .replace(/:(\w+)/g, ':"$1"') // Quote unquoted string values
+          .replace(/:(\d+\.?\d*)/g, ':$1') // Keep numbers as numbers
+          .replace(/:(\w+)/g, ':"$1"'); // Quote remaining unquoted values
+        
+        try {
+          analysis = JSON.parse(fixedJson);
+        } catch (secondError) {
+          console.log('Fixed JSON still invalid, trying manual extraction...');
+          analysis = extractAnalysisManually(generatedText);
+        }
+      }
+    } else {
+      // Try broader JSON pattern if specific one fails
+      const broadJsonMatch = generatedText.match(/\{[\s\S]*\}/);
+      if (broadJsonMatch) {
+        console.log('Found broad JSON match:', broadJsonMatch[0]);
+        try {
+          analysis = JSON.parse(broadJsonMatch[0]);
+        } catch (parseError) {
+          console.log('Broad JSON parse failed, trying manual extraction...');
+          analysis = extractAnalysisManually(generatedText);
+        }
+      }
+    }
+    
+    // Method 2: Try to extract individual fields manually
+    if (!analysis) {
+      analysis = extractAnalysisManually(generatedText);
+    }
+    
+    if (analysis) {
+      // Validate required fields
+      if (analysis.overallScore !== undefined && 
+          analysis.technicalScore !== undefined && 
+          analysis.behavioralScore !== undefined && 
+          analysis.communicationScore !== undefined) {
+        
+        // Ensure arrays exist and have default values
+        analysis.strengths = analysis.strengths || ['Good communication skills'];
+        analysis.weaknesses = analysis.weaknesses || ['Could provide more detailed responses'];
+        analysis.suggestions = analysis.suggestions || ['Practice more interview questions'];
+        analysis.detailedFeedback = analysis.detailedFeedback || {};
+        
         console.log('Extracted analysis:', analysis);
         return analysis;
       }
     }
     
-    console.log('No analysis extracted from AI response');
+    console.log('No valid analysis extracted from AI response');
   } catch (error) {
     console.error('Error extracting analysis from AI response:', error);
   }
   
   return null;
+}
+
+function extractAnalysisManually(text: string) {
+  const analysis: any = {};
+  
+  try {
+    // Extract scores using more flexible regex patterns
+    const overallMatch = text.match(/overallScore["\s]*:[\s]*(\d+)/i) || text.match(/overall["\s]*:[\s]*(\d+)/i);
+    if (overallMatch) analysis.overallScore = parseInt(overallMatch[1]);
+    
+    const technicalMatch = text.match(/technicalScore["\s]*:[\s]*(\d+)/i) || text.match(/technical["\s]*:[\s]*(\d+)/i);
+    if (technicalMatch) analysis.technicalScore = parseInt(technicalMatch[1]);
+    
+    const behavioralMatch = text.match(/behavioralScore["\s]*:[\s]*(\d+)/i) || text.match(/behavioral["\s]*:[\s]*(\d+)/i);
+    if (behavioralMatch) analysis.behavioralScore = parseInt(behavioralMatch[1]);
+    
+    const communicationMatch = text.match(/communicationScore["\s]*:[\s]*(\d+)/i) || text.match(/communication["\s]*:[\s]*(\d+)/i);
+    if (communicationMatch) analysis.communicationScore = parseInt(communicationMatch[1]);
+    
+    // Extract arrays with more flexible patterns
+    const strengthsMatch = text.match(/strengths["\s]*:[\s]*\[(.*?)\]/is) || text.match(/strengths["\s]*:[\s]*"(.*?)"/is);
+    if (strengthsMatch) {
+      analysis.strengths = extractArrayFromText(strengthsMatch[1]);
+    }
+    
+    const weaknessesMatch = text.match(/weaknesses["\s]*:[\s]*\[(.*?)\]/is) || text.match(/weaknesses["\s]*:[\s]*"(.*?)"/is);
+    if (weaknessesMatch) {
+      analysis.weaknesses = extractArrayFromText(weaknessesMatch[1]);
+    }
+    
+    const suggestionsMatch = text.match(/suggestions["\s]*:[\s]*\[(.*?)\]/is) || text.match(/suggestions["\s]*:[\s]*"(.*?)"/is);
+    if (suggestionsMatch) {
+      analysis.suggestions = extractArrayFromText(suggestionsMatch[1]);
+    }
+    
+    // Extract detailed feedback
+    const detailedFeedbackMatch = text.match(/detailedFeedback["\s]*:[\s]*\{(.*?)\}/is);
+    if (detailedFeedbackMatch) {
+      analysis.detailedFeedback = extractDetailedFeedbackFromText(detailedFeedbackMatch[1]);
+    }
+    
+    // If we have at least the scores, return the analysis
+    if (analysis.overallScore !== undefined || analysis.technicalScore !== undefined) {
+      // Set default values for missing fields
+      analysis.strengths = analysis.strengths || ['Good communication skills'];
+      analysis.weaknesses = analysis.weaknesses || ['Could provide more detailed responses'];
+      analysis.suggestions = analysis.suggestions || ['Practice more interview questions'];
+      analysis.detailedFeedback = analysis.detailedFeedback || {};
+      
+      return analysis;
+    }
+  } catch (error) {
+    console.error('Error in manual extraction:', error);
+  }
+  
+  return null;
+}
+
+function extractDetailedFeedbackFromText(feedbackText: string): { [key: string]: string } {
+  const feedback: { [key: string]: string } = {};
+  
+  try {
+    // Look for question patterns like "question1": "feedback"
+    const questionMatches = feedbackText.match(/"question(\d+)"["\s]*:[\s]*"(.*?)"/g);
+    if (questionMatches) {
+      questionMatches.forEach(match => {
+        const questionMatch = match.match(/"question(\d+)"["\s]*:[\s]*"(.*?)"/);
+        if (questionMatch) {
+          feedback[`question${questionMatch[1]}`] = questionMatch[2];
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error extracting detailed feedback:', error);
+  }
+  
+  return feedback;
+}
+
+function extractArrayFromText(arrayText: string): string[] {
+  const items: string[] = [];
+  const lines = arrayText.split(/[,\n]/);
+  
+  for (const line of lines) {
+    const cleanItem = line.replace(/["\[\]]/g, '').trim();
+    if (cleanItem.length > 0) {
+      items.push(cleanItem);
+    }
+  }
+  
+  return items;
 }
 
 function generateSmartAnalysis(questions: any[], answers: any[], jobDetails: any) {
@@ -95,6 +343,9 @@ function generateSmartAnalysis(questions: any[], answers: any[], jobDetails: any
   // Generate personalized feedback
   const feedback = generateFeedback(answers, answerAnalysis, jobDetails);
   
+  // Generate detailed feedback for each question
+  const detailedFeedback = generateDetailedFeedback(questions, answers, jobDetails);
+
   return {
     overallScore: Math.round(scores.overall),
     technicalScore: Math.round(scores.technical),
@@ -102,7 +353,8 @@ function generateSmartAnalysis(questions: any[], answers: any[], jobDetails: any
     communicationScore: Math.round(scores.communication),
     strengths: feedback.strengths,
     weaknesses: feedback.weaknesses,
-    suggestions: feedback.suggestions
+    suggestions: feedback.suggestions,
+    detailedFeedback: detailedFeedback
   };
 }
 
@@ -114,42 +366,63 @@ function analyzeAnswers(answers: any[]) {
     experienceMentions: 0,
     problemSolving: 0,
     specificExamples: 0,
-    communicationQuality: 0
+    communicationQuality: 0,
+    nonsensicalAnswers: 0,
+    poorQualityAnswers: 0,
+    meaningfulAnswers: 0
   };
 
   answers.forEach(answer => {
-    const text = answer.answer.toLowerCase();
-    const wordCount = text.split(' ').length;
+    const text = answer.answer.toLowerCase().trim();
+    const wordCount = text.split(/\s+/).filter((word: string) => word.length > 0).length;
     
     analysis.totalWords += wordCount;
     analysis.averageLength += wordCount;
     
+    // Check for nonsensical answers (like "yup", "tyu", "cyu", "opo", "bji")
+    if (isNonsensicalAnswer(text, wordCount)) {
+      analysis.nonsensicalAnswers++;
+      return; // Skip further analysis for nonsensical answers
+    }
+    
+    // Check for poor quality answers
+    if (isPoorQualityAnswer(text, wordCount)) {
+      analysis.poorQualityAnswers++;
+    } else {
+      analysis.meaningfulAnswers++;
+    }
+    
     // Count technical terms
     if (text.includes('technology') || text.includes('software') || text.includes('system') || 
-        text.includes('development') || text.includes('coding') || text.includes('programming')) {
+        text.includes('development') || text.includes('coding') || text.includes('programming') ||
+        text.includes('api') || text.includes('database') || text.includes('framework') ||
+        text.includes('react') || text.includes('node') || text.includes('javascript')) {
       analysis.technicalTerms++;
     }
     
     // Count experience mentions
     if (text.includes('experience') || text.includes('worked') || text.includes('project') || 
-        text.includes('developed') || text.includes('implemented')) {
+        text.includes('developed') || text.includes('implemented') || text.includes('built') ||
+        text.includes('created') || text.includes('managed') || text.includes('led')) {
       analysis.experienceMentions++;
     }
     
     // Count problem-solving mentions
     if (text.includes('challenge') || text.includes('problem') || text.includes('solved') || 
-        text.includes('overcame') || text.includes('difficult')) {
+        text.includes('overcame') || text.includes('difficult') || text.includes('troubleshoot') ||
+        text.includes('debug') || text.includes('fix') || text.includes('issue')) {
       analysis.problemSolving++;
     }
     
     // Count specific examples
     if (text.includes('example') || text.includes('specific') || text.includes('instance') || 
-        text.includes('case') || text.includes('situation')) {
+        text.includes('case') || text.includes('situation') || text.includes('time when') ||
+        text.includes('once') || text.includes('when i')) {
       analysis.specificExamples++;
     }
     
-    // Assess communication quality
-    if (wordCount > 50 && wordCount < 200) {
+    // Assess communication quality (much stricter)
+    if (wordCount >= 20 && wordCount <= 200 && text.split(/[.!?]+/).length > 1) {
       analysis.communicationQuality++;
     }
   });
@@ -159,36 +432,133 @@ function analyzeAnswers(answers: any[]) {
   return analysis;
 }
 
+function isNonsensicalAnswer(text: string, wordCount: number): boolean {
+  // Single word answers
+  if (wordCount <= 1) return true;
+  
+  // Very short nonsensical patterns
+  if (wordCount <= 4) {
+    const nonsensicalPatterns = [
+      /^[a-z]{1,4}$/i, // 1-4 letter words only
+      /^[^a-zA-Z0-9\s]*$/g, // Only special characters
+      /^[0-9\s]*$/g, // Only numbers
+      /(.)\1{2,}/g, // Repeated characters like "aaa"
+      /^[bcdfghjklmnpqrstvwxyz]{1,4}$/i // Only consonants
+    ];
+    
+    for (const pattern of nonsensicalPatterns) {
+      if (pattern.test(text)) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
+}
+
+function isPoorQualityAnswer(text: string, wordCount: number): boolean {
+  // Very short answers
+  if (wordCount < 10) return true;
+  
+  // Short answers without meaningful content
+  if (wordCount < 20) {
+    const meaningfulWords = [
+      'worked', 'developed', 'created', 'built', 'implemented', 'designed',
+      'managed', 'led', 'collaborated', 'solved', 'challenge', 'problem',
+      'experience', 'project', 'team', 'result', 'outcome', 'success',
+      'learned', 'improved', 'optimized', 'enhanced', 'achieved'
+    ];
+    
+    const hasMeaningfulContent = meaningfulWords.some(word => text.includes(word));
+    return !hasMeaningfulContent;
+  }
+  
+  return false;
+}
+
 function calculateScores(answers: any[], analysis: any, jobDetails: any) {
   let overall = 0;
   let technical = 0;
   let behavioral = 0;
   let communication = 0;
   
-  // Base score from completion rate
-  const completionRate = (answers.length / 5) * 100;
-  overall += completionRate * 0.3;
+  // EXTREME penalties for nonsensical answers
+  if (analysis.nonsensicalAnswers > 0) {
+    // If any nonsensical answers, cap all scores very low
+    overall = Math.min(15, analysis.nonsensicalAnswers * 5);
+    technical = Math.min(10, analysis.nonsensicalAnswers * 3);
+    behavioral = Math.min(10, analysis.nonsensicalAnswers * 3);
+    communication = Math.min(15, analysis.nonsensicalAnswers * 4);
+    
+    return { overall, technical, behavioral, communication };
+  }
   
-  // Technical score based on technical content
-  technical += analysis.technicalTerms * 15;
-  technical += analysis.experienceMentions * 10;
-  technical = Math.min(technical, 100);
+  // Heavy penalties for poor quality answers
+  if (analysis.poorQualityAnswers > 0) {
+    const poorQualityPenalty = analysis.poorQualityAnswers * 20;
+    
+    // Technical score - very strict
+    if (analysis.technicalTerms > 0) {
+      technical = Math.min(analysis.technicalTerms * 15, 100);
+    } else {
+      technical = 0;
+    }
+    technical = Math.max(0, technical - poorQualityPenalty);
+    
+    // Behavioral score - very strict
+    if (analysis.problemSolving > 0 || analysis.specificExamples > 0) {
+      behavioral = Math.min((analysis.problemSolving + analysis.specificExamples) * 12, 100);
+    } else {
+      behavioral = 0;
+    }
+    behavioral = Math.max(0, behavioral - poorQualityPenalty);
+    
+    // Communication score - very strict
+    if (analysis.communicationQuality > 0) {
+      communication = Math.min(analysis.communicationQuality * 20, 100);
+    } else {
+      communication = 0;
+    }
+    communication = Math.max(0, communication - poorQualityPenalty);
+    
+    // Overall score - heavily penalized
+    overall = Math.max(0, (technical + behavioral + communication) / 3 - poorQualityPenalty);
+    
+    return { overall, technical, behavioral, communication };
+  }
   
-  // Behavioral score based on problem-solving and examples
-  behavioral += analysis.problemSolving * 20;
-  behavioral += analysis.specificExamples * 15;
-  behavioral += analysis.experienceMentions * 10;
-  behavioral = Math.min(behavioral, 100);
+  // Normal scoring for meaningful answers
+  if (analysis.meaningfulAnswers > 0) {
+    // Technical score
+    if (analysis.technicalTerms > 0) {
+      technical = Math.min(analysis.technicalTerms * 20, 100);
+    } else {
+      technical = 0;
+    }
+    
+    // Behavioral score
+    if (analysis.problemSolving > 0 || analysis.specificExamples > 0) {
+      behavioral = Math.min((analysis.problemSolving + analysis.specificExamples) * 15, 100);
+    } else {
+      behavioral = 0;
+    }
+    
+    // Communication score
+    if (analysis.communicationQuality > 0) {
+      communication = Math.min(analysis.communicationQuality * 25, 100);
+    } else {
+      communication = 0;
+    }
+    
+    // Overall score
+    overall = (technical + behavioral + communication) / 3;
+  }
   
-  // Communication score based on answer quality
-  communication += analysis.communicationQuality * 20;
-  communication += (analysis.averageLength > 50 ? 30 : 0);
-  communication += (analysis.averageLength > 100 ? 20 : 0);
-  communication = Math.min(communication, 100);
-  
-  // Overall score
-  overall += (technical + behavioral + communication) / 3 * 0.7;
-  overall = Math.min(overall, 100);
+  // Ensure scores are within bounds
+  overall = Math.max(0, Math.min(100, overall));
+  technical = Math.max(0, Math.min(100, technical));
+  behavioral = Math.max(0, Math.min(100, behavioral));
+  communication = Math.max(0, Math.min(100, communication));
   
   return { overall, technical, behavioral, communication };
 }
@@ -258,6 +628,81 @@ function generateFeedback(answers: any[], analysis: any, jobDetails: any) {
   }
   
   return { strengths, weaknesses, suggestions };
+}
+
+function generateDetailedFeedback(questions: any[], answers: any[], jobDetails: any) {
+  const detailedFeedback: { [key: string]: string } = {};
+  
+  questions.forEach((question, index) => {
+    const answer = answers.find(ans => ans.questionIndex === index);
+    const questionKey = `question${index + 1}`;
+    
+    if (!answer) {
+      detailedFeedback[questionKey] = "No answer provided. Consider preparing responses for common interview questions.";
+      return;
+    }
+    
+    const answerText = answer.answer.toLowerCase();
+    const wordCount = answer.answer.split(' ').length;
+    const questionType = question.type || 'General';
+    
+    let feedback = '';
+    
+    // Analyze answer quality based on question type
+    if (questionType.toLowerCase().includes('technical')) {
+      if (answerText.includes('experience') || answerText.includes('worked') || answerText.includes('developed')) {
+        feedback += "Good use of specific experience and examples. ";
+      } else {
+        feedback += "Consider providing more specific technical examples from your experience. ";
+      }
+      
+      if (wordCount < 30) {
+        feedback += "Could elaborate more on technical details and implementation. ";
+      }
+    } else if (questionType.toLowerCase().includes('behavioral')) {
+      if (answerText.includes('situation') || answerText.includes('task') || answerText.includes('action') || answerText.includes('result')) {
+        feedback += "Excellent use of STAR method for behavioral questions. ";
+      } else {
+        feedback += "Consider using the STAR method (Situation, Task, Action, Result) for better structure. ";
+      }
+      
+      if (wordCount < 40) {
+        feedback += "Could provide more detailed examples and context. ";
+      }
+    } else {
+      // General questions
+      if (wordCount < 20) {
+        feedback += "Consider providing more comprehensive answers with specific examples. ";
+      } else if (wordCount > 100) {
+        feedback += "Good detailed response, but ensure you stay focused on the key points. ";
+      } else {
+        feedback += "Well-structured response with good detail. ";
+      }
+    }
+    
+    // Communication quality
+    if (wordCount >= 30 && wordCount <= 80) {
+      feedback += "Good communication skills demonstrated. ";
+    } else if (wordCount < 30) {
+      feedback += "Consider expanding your answer for better clarity. ";
+    }
+    
+    // Relevance to job
+    if (answerText.includes(jobDetails.title.toLowerCase()) || 
+        answerText.includes(jobDetails.company.toLowerCase()) ||
+        answerText.includes('relevant') || answerText.includes('applicable')) {
+      feedback += "Good relevance to the position and company. ";
+    }
+    
+    // Default feedback if none generated
+    if (!feedback.trim()) {
+      feedback = "Good response. Consider adding more specific examples to strengthen your answer.";
+    }
+    
+    detailedFeedback[questionKey] = feedback.trim();
+  });
+  
+  return detailedFeedback;
 }
 
 export default router;
