@@ -51,6 +51,11 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Handle favicon requests (prevents 404 errors)
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end(); // No content, but success
+});
+
 // Routes
 app.use('/api/resume', resumeRoutes);
 app.use('/api/questions', questionRoutes);
