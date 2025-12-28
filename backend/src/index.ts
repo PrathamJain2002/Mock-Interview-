@@ -56,32 +56,41 @@ app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (mobile apps, Postman, etc.)
     if (!origin) {
+      console.log('CORS: Allowing request with no origin');
       return callback(null, true);
     }
     
-    // Normalize the origin (remove trailing slash)
-    const normalizedOrigin = normalizeUrl(origin);
+    // Normalize the origin (remove trailing slash and convert to lowercase for comparison)
+    const normalizedOrigin = normalizeUrl(origin).toLowerCase();
+    
+    console.log(`CORS: Checking origin: ${origin} (normalized: ${normalizedOrigin})`);
     
     // Allow localhost for development
     if (normalizedOrigin.startsWith('http://localhost:') || normalizedOrigin.startsWith('https://localhost:')) {
+      console.log('CORS: Allowing localhost origin');
       return callback(null, true);
     }
     
     // Allow all Vercel domains (production and preview deployments)
     // Vercel URLs end with .vercel.app
     if (normalizedOrigin.endsWith('.vercel.app')) {
+      console.log('CORS: Allowing Vercel domain');
       return callback(null, true);
     }
     
-    // Check if normalized origin matches configured frontend URL
-    if (normalizedOrigin === FRONTEND_URL) {
+    // Check if normalized origin matches configured frontend URL (case-insensitive)
+    const normalizedFrontendUrl = FRONTEND_URL.toLowerCase();
+    if (normalizedOrigin === normalizedFrontendUrl) {
+      console.log('CORS: Allowing configured frontend URL');
       return callback(null, true);
     }
     
-    console.warn(`CORS blocked origin: ${normalizedOrigin}`);
-    callback(new Error('Not allowed by CORS'));
+    console.warn(`CORS: BLOCKED origin: ${normalizedOrigin} (configured: ${normalizedFrontendUrl})`);
+    callback(new Error(`Not allowed by CORS: ${origin}`));
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json({ limit: '50mb' }));
