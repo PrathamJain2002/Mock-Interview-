@@ -42,9 +42,38 @@ console.log('========================================\n');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
+// Normalize FRONTEND_URL (remove trailing slash if present)
+const normalizeUrl = (url: string): string => {
+  return url.replace(/\/$/, ''); // Remove trailing slash
+};
+
+const FRONTEND_URL = process.env.FRONTEND_URL 
+  ? normalizeUrl(process.env.FRONTEND_URL)
+  : 'http://localhost:3000';
+
+// CORS configuration - handle origins with or without trailing slash
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) {
+      return callback(null, true);
+    }
+    
+    // Normalize the origin (remove trailing slash)
+    const normalizedOrigin = normalizeUrl(origin);
+    
+    // Check if normalized origin matches allowed frontend URL
+    if (normalizedOrigin === FRONTEND_URL) {
+      return callback(null, true);
+    }
+    
+    // Also allow localhost for development
+    if (normalizedOrigin.startsWith('http://localhost:') || normalizedOrigin.startsWith('https://localhost:')) {
+      return callback(null, true);
+    }
+    
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true
 }));
 
@@ -103,7 +132,7 @@ const startServer = async () => {
       console.log('========================================');
       console.log(`📍 Port: ${PORT}`);
       console.log(`📱 Health check: http://localhost:${PORT}/api/health`);
-      console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+      console.log(`🌐 Frontend URL: ${FRONTEND_URL}`);
       console.log(`📝 Resume parsing: http://localhost:${PORT}/api/resume/parse`);
       console.log(`❓ Question generation: http://localhost:${PORT}/api/questions/generate`);
       console.log(`📊 Performance analysis: http://localhost:${PORT}/api/performance/analyze`);
