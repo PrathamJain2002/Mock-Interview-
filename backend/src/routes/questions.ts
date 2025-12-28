@@ -1,8 +1,13 @@
 import express from 'express';
 import { ParsedResume } from '../utils/pdfParser';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama2';
+// Read environment variables (will be available after dotenv.config() in index.ts)
+const getEnvVars = () => ({
+  GOOGLE_GENAI_API_KEY: process.env.GOOGLE_GENAI_API_KEY,
+  OLLAMA_URL: process.env.OLLAMA_URL || 'http://localhost:11434',
+  OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'llama2'
+});
 
 const router = express.Router();
 
@@ -30,9 +35,42 @@ router.post('/generate', async (req, res) => {
 
     // Create a detailed prompt using parsed resume data
     const prompt = createInterviewPrompt(parsedResume, jobDetails);
+    const fullPrompt = `You are an expert HR interviewer. Generate relevant interview questions based on job details. ${prompt}`;
 
+    // Get environment variables (read fresh each time)
+    const { GOOGLE_GENAI_API_KEY, OLLAMA_URL, OLLAMA_MODEL } = getEnvVars();
+
+    // Try Google GenAI first
+    console.log('Checking for Google GenAI API key...', GOOGLE_GENAI_API_KEY ? 'Key found' : 'Key not found');
+    if (GOOGLE_GENAI_API_KEY) {
+      try {
+        const genAI = new GoogleGenerativeAI(GOOGLE_GENAI_API_KEY);
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+        
+        const result = await model.generateContent(fullPrompt);
+        const response = await result.response;
+        const generatedText = response.text();
+        
+        console.log('Google GenAI API response received');
+        const aiQuestions = extractQuestionsFromGenAI(generatedText, jobDetails);
+        
+        if (aiQuestions.length > 0) {
+          console.log('Using Google GenAI-generated questions!', aiQuestions.length);
+          return res.json({
+            success: true,
+            questions: aiQuestions,
+            totalQuestions: aiQuestions.length,
+            source: 'Google GenAI'
+          });
+        }
+      } catch (genAIError) {
+        console.error('Error connecting to Google GenAI:', genAIError);
+        // Fall through to Ollama backup
+      }
+    }
+
+    // Fallback to Ollama
     try {
-      // Try to use Ollama AI first
       const response = await fetch(`${OLLAMA_URL}/api/generate`, {
         method: 'POST',
         headers: {
@@ -40,7 +78,7 @@ router.post('/generate', async (req, res) => {
         },
         body: JSON.stringify({
           model: OLLAMA_MODEL,
-          prompt: `You are an expert HR interviewer. Generate relevant interview questions based on job details. ${prompt}`,
+          prompt: fullPrompt,
           stream: false,
           options: {
             temperature: 0.7,
@@ -55,19 +93,19 @@ router.post('/generate', async (req, res) => {
         const aiQuestions = extractQuestionsFromAI(data, jobDetails);
         
         if (aiQuestions.length > 0) {
-          console.log('Using AI-generated questions!', aiQuestions.length);
+          console.log('Using Ollama-generated questions!', aiQuestions.length);
           return res.json({
             success: true,
             questions: aiQuestions,
             totalQuestions: aiQuestions.length,
-            source: 'AI'
+            source: 'Ollama'
           });
         }
       } else {
         console.error('Ollama API error:', response.status, response.statusText);
       }
-    } catch (aiError) {
-      console.error('Error connecting to Ollama:', aiError);
+    } catch (ollamaError) {
+      console.error('Error connecting to Ollama:', ollamaError);
     }
 
     // Fallback to smart mock questions
@@ -316,6 +354,71 @@ function createInterviewPrompt(resumeContent: ParsedResume | null, jobDetails: J
   prompt += ` Questions should cover: 1. Technical skills (especially those mentioned in resume) 2. Behavioral situations 3. Motivation 4. Problem solving 5. Experience-based scenarios. Tailor questions to the candidate's background. Format as JSON array with id, text, and category fields.`;
   
   return prompt;
+}
+
+function extractQuestionsFromGenAI(generatedText: string, jobDetails: JobDetails): Question[] {
+  try {
+    console.log('Extracting from Google GenAI data:', generatedText);
+    
+    // First, try to find a complete JSON array
+    const jsonArrayMatch = generatedText.match(/\[[\s\S]*\]/);
+    if (jsonArrayMatch) {
+      console.log('Found JSON array match:', jsonArrayMatch[0]);
+      const questions = JSON.parse(jsonArrayMatch[0]);
+      if (Array.isArray(questions) && questions.length > 0) {
+        console.log('Extracted questions from JSON array:', questions);
+        return questions.map((q: any, index: number) => ({
+          id: q.id || index + 1,
+          text: q.text || q.question || '',
+          category: q.category || getCategoryFromQuestion(q.text || q.question || '')
+        }));
+      }
+    }
+    
+    // If no JSON array, try to extract individual question objects
+    const questionObjectMatches = generatedText.match(/\{[^}]+\}/g);
+    if (questionObjectMatches && questionObjectMatches.length > 0) {
+      console.log('Found question object matches:', questionObjectMatches);
+      const questions = questionObjectMatches.slice(0, 5).map((match: string, index: number) => {
+        try {
+          const questionObj = JSON.parse(match);
+          return {
+            id: questionObj.id || index + 1,
+            text: questionObj.text || questionObj.question || '',
+            category: questionObj.category || getCategoryFromQuestion(questionObj.text || questionObj.question || '')
+          };
+        } catch (e) {
+          return {
+            id: index + 1,
+            text: match,
+            category: getCategoryFromQuestion(match)
+          };
+        }
+      }).filter((q: any) => q.text && q.text.length > 10); // Filter out invalid questions
+      
+      if (questions.length > 0) {
+        console.log('Extracted questions from individual objects:', questions);
+        return questions;
+      }
+    }
+    
+    // If no structured JSON found, try to extract questions from text
+    const questionMatches = generatedText.match(/\d+\.\s*([^?]+\?)/g);
+    if (questionMatches && questionMatches.length > 0) {
+      console.log('Found question matches:', questionMatches);
+      return questionMatches.slice(0, 5).map((match: string, index: number) => ({
+        id: index + 1,
+        text: match.replace(/^\d+\.\s*/, ''),
+        category: getCategoryFromQuestion(match)
+      }));
+    }
+    
+    console.log('No questions extracted from Google GenAI response');
+  } catch (error) {
+    console.error('Error extracting questions from Google GenAI response:', error);
+  }
+  
+  return [];
 }
 
 function extractQuestionsFromAI(data: any, jobDetails: JobDetails): Question[] {

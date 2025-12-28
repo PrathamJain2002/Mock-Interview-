@@ -48,12 +48,12 @@ async function tryAlternativePDFParsing(buffer: Buffer): Promise<string> {
     const originalRequire = Module.prototype.require;
     
     // Temporarily override require to handle the test file issue
-    Module.prototype.require = function(id: string) {
+    Module.prototype.require = function(id: string, ...args: unknown[]) {
       if (id.includes('test/data/')) {
         // Return empty buffer for test files
         return Buffer.alloc(0);
       }
-      return originalRequire.apply(this, arguments);
+      return originalRequire.apply(this, [id, ...args] as [string, ...unknown[]]);
     };
     
     const pdfParse = eval('require')('pdf-parse');

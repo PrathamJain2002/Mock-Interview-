@@ -103,7 +103,7 @@ function parseResumeContent(text: string): ParsedResume {
       throw new Error('Empty text provided for parsing');
     }
 
-    const sections = text.toLowerCase();
+    // const sections = text.toLowerCase(); // Unused variable
     const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
     console.log('Split into', lines.length, 'non-empty lines');
     
@@ -159,8 +159,15 @@ function parseResumeContent(text: string): ParsedResume {
   }
 }
 
-function extractPersonalInfo(lines: string[]) {
-  const personalInfo: any = {};
+interface PersonalInfo {
+  name?: string;
+  email?: string;
+  phone?: string;
+  location?: string;
+}
+
+function extractPersonalInfo(lines: string[]): PersonalInfo {
+  const personalInfo: PersonalInfo = {};
   
   // Look for email
   const emailPattern = /[\w\.-]+@[\w\.-]+\.\w+/;
@@ -258,7 +265,7 @@ function extractSkills(text: string, lines: string[]): string[] {
 
 function extractSkillsFromLine(line: string, techSkills: string[]): string[] {
   const skills: string[] = [];
-  const lowerLine = line.toLowerCase();
+  // const lowerLine = line.toLowerCase(); // Unused variable
   
   // Split by common separators
   const words = line.split(/[,•·\-\|\n\t]+/).map(w => w.trim()).filter(w => w.length > 0);
@@ -273,12 +280,19 @@ function extractSkillsFromLine(line: string, techSkills: string[]): string[] {
   return skills;
 }
 
-function extractExperience(lines: string[]): Array<any> {
-  const experience: Array<any> = [];
+interface ExperienceEntry {
+  title?: string;
+  company?: string;
+  duration?: string;
+  description?: string;
+}
+
+function extractExperience(lines: string[]): Array<ExperienceEntry> {
+  const experience: Array<ExperienceEntry> = [];
   const experienceKeywords = ['experience', 'work history', 'employment', 'professional experience'];
   
   let inExperienceSection = false;
-  let currentJob: any = {};
+  let currentJob: ExperienceEntry = {};
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].toLowerCase();
@@ -322,12 +336,18 @@ function extractExperience(lines: string[]): Array<any> {
   return experience;
 }
 
-function extractProjects(lines: string[]): Array<any> {
-  const projects: Array<any> = [];
+interface ProjectEntry {
+  name?: string;
+  description?: string;
+  technologies?: string[];
+}
+
+function extractProjects(lines: string[]): Array<ProjectEntry> {
+  const projects: Array<ProjectEntry> = [];
   const projectKeywords = ['projects', 'personal projects', 'key projects', 'notable projects'];
   
   let inProjectsSection = false;
-  let currentProject: any = {};
+  let currentProject: ProjectEntry = {};
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].toLowerCase();
@@ -364,8 +384,14 @@ function extractProjects(lines: string[]): Array<any> {
   return projects;
 }
 
-function extractEducation(lines: string[]): Array<any> {
-  const education: Array<any> = [];
+interface EducationEntry {
+  degree?: string;
+  institution?: string;
+  year?: string;
+}
+
+function extractEducation(lines: string[]): Array<EducationEntry> {
+  const education: Array<EducationEntry> = [];
   const educationKeywords = ['education', 'academic background', 'qualifications'];
   
   let inEducationSection = false;
@@ -384,7 +410,7 @@ function extractEducation(lines: string[]): Array<any> {
       }
       
       if (lines[i].length > 5) {
-        const eduEntry: any = {};
+        const eduEntry: EducationEntry = {};
         
         // Look for degree patterns
         if (line.includes('bachelor') || line.includes('master') || line.includes('phd') || 

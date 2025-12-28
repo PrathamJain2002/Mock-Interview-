@@ -1,10 +1,15 @@
 import express from 'express';
 import { Request, Response } from 'express';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const router = express.Router();
 
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama2';
+// Read environment variables (will be available after dotenv.config() in index.ts)
+const getEnvVars = () => ({
+  GOOGLE_GENAI_API_KEY: process.env.GOOGLE_GENAI_API_KEY,
+  OLLAMA_URL: process.env.OLLAMA_URL || 'http://localhost:11434',
+  OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'llama2'
+});
 
 // Helper function to create formatted Q&A section for the prompt
 function createQASection(questions: any[], answers: any[]): string {
@@ -117,33 +122,67 @@ Focus on:
 4. Relevance to the job requirements
 5. Specific strengths and areas for improvement`;
 
-    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        prompt: `You are an expert HR interviewer and technical recruiter with 10+ years of experience. Analyze the interview performance and provide detailed, constructive feedback. ${prompt}`,
-        stream: false,
-        options: {
-          temperature: 0.7,
-          num_predict: 1000
-        }
-      })
-    });
+    const fullPrompt = `You are an expert HR interviewer and technical recruiter with 10+ years of experience. Analyze the interview performance and provide detailed, constructive feedback. ${prompt}`;
 
-    if (response.ok) {
-      const data = await response.json();
-      console.log('Ollama API response:', data);
-      const aiAnalysis = extractAnalysisFromAI(data, questions, answers, jobDetails);
-      
-      if (aiAnalysis) {
-        console.log('Using AI-generated analysis!');
-        return res.json(aiAnalysis);
+    // Get environment variables (read fresh each time)
+    const { GOOGLE_GENAI_API_KEY, OLLAMA_URL, OLLAMA_MODEL } = getEnvVars();
+
+    // Try Google GenAI first
+    console.log('Checking for Google GenAI API key...', GOOGLE_GENAI_API_KEY ? 'Key found' : 'Key not found');
+    if (GOOGLE_GENAI_API_KEY) {
+      try {
+        const genAI = new GoogleGenerativeAI(GOOGLE_GENAI_API_KEY);
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+        
+        const result = await model.generateContent(fullPrompt);
+        const response = await result.response;
+        const generatedText = response.text();
+        
+        console.log('Google GenAI API response received');
+        const aiAnalysis = extractAnalysisFromGenAI(generatedText, questions, answers, jobDetails);
+        
+        if (aiAnalysis) {
+          console.log('Using Google GenAI-generated analysis!');
+          return res.json(aiAnalysis);
+        }
+      } catch (genAIError) {
+        console.error('Error connecting to Google GenAI:', genAIError);
+        // Fall through to Ollama backup
       }
-    } else {
-      console.error('Ollama API error:', response.status, response.statusText);
+    }
+
+    // Fallback to Ollama
+    try {
+      const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          prompt: fullPrompt,
+          stream: false,
+          options: {
+            temperature: 0.7,
+            num_predict: 1000
+          }
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log('Ollama API response:', data);
+        const aiAnalysis = extractAnalysisFromAI(data, questions, answers, jobDetails);
+        
+        if (aiAnalysis) {
+          console.log('Using Ollama-generated analysis!');
+          return res.json(aiAnalysis);
+        }
+      } else {
+        console.error('Ollama API error:', response.status, response.statusText);
+      }
+    } catch (ollamaError) {
+      console.error('Error connecting to Ollama:', ollamaError);
     }
 
     // Fallback to smart analysis
@@ -159,6 +198,82 @@ Focus on:
     return res.json(smartAnalysis);
   }
 });
+
+function extractAnalysisFromGenAI(generatedText: string, questions: any[], answers: any[], jobDetails: any) {
+  try {
+    console.log('Extracting from Google GenAI data:', generatedText);
+    
+    // Try multiple JSON extraction methods
+    let analysis = null;
+    
+    // Method 1: Look for complete JSON object (more specific pattern)
+    const jsonMatch = generatedText.match(/\{\s*"overallScore"[\s\S]*?\}/);
+    if (jsonMatch) {
+      console.log('Found JSON match:', jsonMatch[0]);
+      try {
+        analysis = JSON.parse(jsonMatch[0]);
+      } catch (parseError) {
+        console.log('JSON parse failed, trying to fix common issues...');
+        // Try to fix common JSON issues
+        let fixedJson = jsonMatch[0]
+          .replace(/,(\s*[}\]])/g, '$1') // Remove trailing commas
+          .replace(/([^\\])\\([^\\])/g, '$1\\\\$2') // Fix backslashes
+          .replace(/(\w+):/g, '"$1":') // Quote unquoted keys
+          .replace(/:(\w+)/g, ':"$1"') // Quote unquoted string values
+          .replace(/:(\d+\.?\d*)/g, ':$1') // Keep numbers as numbers
+          .replace(/:(\w+)/g, ':"$1"'); // Quote remaining unquoted values
+        
+        try {
+          analysis = JSON.parse(fixedJson);
+        } catch (secondError) {
+          console.log('Fixed JSON still invalid, trying manual extraction...');
+          analysis = extractAnalysisManually(generatedText);
+        }
+      }
+    } else {
+      // Try broader JSON pattern if specific one fails
+      const broadJsonMatch = generatedText.match(/\{[\s\S]*\}/);
+      if (broadJsonMatch) {
+        console.log('Found broad JSON match:', broadJsonMatch[0]);
+        try {
+          analysis = JSON.parse(broadJsonMatch[0]);
+        } catch (parseError) {
+          console.log('Broad JSON parse failed, trying manual extraction...');
+          analysis = extractAnalysisManually(generatedText);
+        }
+      }
+    }
+    
+    // Method 2: Try to extract individual fields manually
+    if (!analysis) {
+      analysis = extractAnalysisManually(generatedText);
+    }
+    
+    if (analysis) {
+      // Validate required fields
+      if (analysis.overallScore !== undefined && 
+          analysis.technicalScore !== undefined && 
+          analysis.behavioralScore !== undefined && 
+          analysis.communicationScore !== undefined) {
+        
+        // Ensure arrays exist and have default values
+        analysis.strengths = analysis.strengths || ['Good communication skills'];
+        analysis.weaknesses = analysis.weaknesses || ['Could provide more detailed responses'];
+        analysis.suggestions = analysis.suggestions || ['Practice more interview questions'];
+        analysis.detailedFeedback = analysis.detailedFeedback || {};
+        
+        console.log('Extracted analysis:', analysis);
+        return analysis;
+      }
+    }
+    
+    console.log('No valid analysis extracted from Google GenAI response');
+  } catch (error) {
+    console.error('Error extracting analysis from Google GenAI response:', error);
+  }
+  
+  return null;
+}
 
 function extractAnalysisFromAI(data: any, questions: any[], answers: any[], jobDetails: any) {
   try {

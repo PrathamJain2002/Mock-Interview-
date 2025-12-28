@@ -7,10 +7,8 @@ import {
   AlertCircle, 
   TrendingUp, 
   Clock, 
-  MessageSquare, 
   Star,
   Download,
-  Share2,
   ArrowLeft
 } from 'lucide-react';
 import Link from 'next/link';
@@ -68,7 +66,7 @@ export default function ReportPage() {
       // Redirect to home if no results
       window.location.href = '/';
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const generatePerformanceMetrics = async (results: InterviewResults) => {
     setIsLoading(true);
@@ -112,7 +110,7 @@ export default function ReportPage() {
       const response = await apiUtils.saveInterviewResults({
         name: results.userInfo.name,
         mobileNumber: results.userInfo.mobileNumber,
-        email: results.userInfo.email,
+        email: results.userInfo.email || '',
         overallScore: analysis.overallScore,
         technicalScore: analysis.technicalScore,
         behavioralScore: analysis.behavioralScore,
@@ -145,7 +143,7 @@ export default function ReportPage() {
     
     // Calculate scores based on answer length and content
     const scores = answers.map(answer => {
-      const question = questions.find(q => q.id === answer.questionId);
+      // const question = questions.find(q => q.id === answer.questionId); // Unused variable
       let score = 0;
       
       // Basic scoring logic

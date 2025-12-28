@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
+const GOOGLE_GENAI_API_KEY = process.env.GOOGLE_GENAI_API_KEY;
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama2';
 
@@ -37,34 +39,63 @@ export async function POST(request: NextRequest) {
     
     // Create a detailed prompt using parsed resume data
     const prompt = createInterviewPrompt(resumeContent, jobDetails);
+    const fullPrompt = `You are an expert HR interviewer. Generate relevant interview questions based on job details. ${prompt}`;
 
-    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        prompt: `You are an expert HR interviewer. Generate relevant interview questions based on job details. ${prompt}`,
-        stream: false,
-        options: {
-          temperature: 0.7,
-          num_predict: 500
+    // Try Google GenAI first
+    if (GOOGLE_GENAI_API_KEY) {
+      try {
+        const genAI = new GoogleGenerativeAI(GOOGLE_GENAI_API_KEY);
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+        
+        const result = await model.generateContent(fullPrompt);
+        const response = await result.response;
+        const generatedText = response.text();
+        
+        console.log('Google GenAI API response received');
+        const aiQuestions = extractQuestionsFromGenAI(generatedText);
+        
+        if (aiQuestions.length > 0) {
+          console.log('Using Google GenAI-generated questions!');
+          return NextResponse.json({ questions: aiQuestions });
         }
-      })
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      console.log('Ollama API response:', data);
-      const aiQuestions = extractQuestionsFromAI(data, jobDetails);
-      
-      if (aiQuestions.length > 0) {
-        console.log('Using AI-generated questions!');
-        return NextResponse.json({ questions: aiQuestions });
+      } catch (genAIError) {
+        console.error('Error connecting to Google GenAI:', genAIError);
+        // Fall through to Ollama backup
       }
-    } else {
-      console.error('Ollama API error:', response.status, response.statusText);
+    }
+
+    // Fallback to Ollama
+    try {
+      const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          prompt: fullPrompt,
+          stream: false,
+          options: {
+            temperature: 0.7,
+            num_predict: 500
+          }
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log('Ollama API response:', data);
+        const aiQuestions = extractQuestionsFromAI(data);
+        
+        if (aiQuestions.length > 0) {
+          console.log('Using Ollama-generated questions!');
+          return NextResponse.json({ questions: aiQuestions });
+        }
+      } else {
+        console.error('Ollama API error:', response.status, response.statusText);
+      }
+    } catch (ollamaError) {
+      console.error('Error connecting to Ollama:', ollamaError);
     }
 
     // Fallback to smart mock questions
@@ -81,7 +112,14 @@ export async function POST(request: NextRequest) {
   }
 }
 
-function createInterviewPrompt(resumeContent: ParsedResume | null, jobDetails: any): string {
+interface JobDetails {
+  title: string;
+  company: string;
+  description?: string;
+  requirements?: string;
+}
+
+function createInterviewPrompt(resumeContent: ParsedResume | null, jobDetails: JobDetails): string {
   let prompt = `Generate 5 interview questions for a ${jobDetails.title} position at ${jobDetails.company}.`;
   
   if (jobDetails.description) {
@@ -129,7 +167,77 @@ function createInterviewPrompt(resumeContent: ParsedResume | null, jobDetails: a
   return prompt;
 }
 
-function extractQuestionsFromAI(data: any, jobDetails: any) {
+function extractQuestionsFromGenAI(generatedText: string) {
+  try {
+    console.log('Extracting from Google GenAI data:', generatedText);
+    
+    // First, try to find a complete JSON array
+    const jsonArrayMatch = generatedText.match(/\[[\s\S]*\]/);
+    if (jsonArrayMatch) {
+      console.log('Found JSON array match:', jsonArrayMatch[0]);
+      const questions = JSON.parse(jsonArrayMatch[0]);
+      if (Array.isArray(questions) && questions.length > 0) {
+        console.log('Extracted questions from JSON array:', questions);
+        return questions.map((q: any, index: number) => ({
+          id: q.id || index + 1,
+          text: q.text || q.question || '',
+          category: q.category || getCategoryFromQuestion(q.text || q.question || '')
+        }));
+      }
+    }
+    
+    // If no JSON array, try to extract individual question objects
+    const questionObjectMatches = generatedText.match(/\{[^}]+\}/g);
+    if (questionObjectMatches && questionObjectMatches.length > 0) {
+      console.log('Found question object matches:', questionObjectMatches);
+      const questions = questionObjectMatches.slice(0, 5).map((match: string, index: number) => {
+        try {
+          const questionObj = JSON.parse(match);
+          return {
+            id: questionObj.id || index + 1,
+            text: questionObj.text || questionObj.question || '',
+            category: questionObj.category || getCategoryFromQuestion(questionObj.text || questionObj.question || '')
+          };
+        } catch {
+          return {
+            id: index + 1,
+            text: match,
+            category: getCategoryFromQuestion(match)
+          };
+        }
+      }).filter((q: { text: string }) => q.text && q.text.length > 10); // Filter out invalid questions
+      
+      if (questions.length > 0) {
+        console.log('Extracted questions from individual objects:', questions);
+        return questions;
+      }
+    }
+    
+    // If no structured JSON found, try to extract questions from text
+    const questionMatches = generatedText.match(/\d+\.\s*([^?]+\?)/g);
+    if (questionMatches && questionMatches.length > 0) {
+      console.log('Found question matches:', questionMatches);
+      return questionMatches.slice(0, 5).map((match: string, index: number) => ({
+        id: index + 1,
+        text: match.replace(/^\d+\.\s*/, ''),
+        category: getCategoryFromQuestion(match)
+      }));
+    }
+    
+    console.log('No questions extracted from Google GenAI response');
+  } catch (error) {
+    console.error('Error extracting questions from Google GenAI response:', error);
+  }
+  
+  return [];
+}
+
+interface OllamaResponse {
+  response?: string;
+  [key: string]: unknown;
+}
+
+function extractQuestionsFromAI(data: OllamaResponse) {
   try {
     console.log('Extracting from Ollama data:', JSON.stringify(data, null, 2));
     const generatedText = data.response || '';
@@ -158,14 +266,14 @@ function extractQuestionsFromAI(data: any, jobDetails: any) {
             text: questionObj.text || '',
             category: questionObj.category || getCategoryFromQuestion(questionObj.text || '')
           };
-        } catch (e) {
+        } catch {
           return {
             id: index + 1,
             text: match,
             category: getCategoryFromQuestion(match)
           };
         }
-      }).filter((q: any) => q.text && q.text.length > 10); // Filter out invalid questions
+      }).filter((q: { text: string }) => q.text && q.text.length > 10); // Filter out invalid questions
       
       if (questions.length > 0) {
         console.log('Extracted questions from individual objects:', questions);
@@ -207,8 +315,8 @@ function getCategoryFromQuestion(question: string) {
   }
 }
 
-function generateSmartQuestions(jobDetails: any, resumeContent: ParsedResume | null) {
-  const { title, company, description, requirements } = jobDetails;
+function generateSmartQuestions(jobDetails: JobDetails, resumeContent: ParsedResume | null) {
+  const { title, company, requirements } = jobDetails;
   
   // Base questions that adapt to job details and resume
   const baseQuestions = [
@@ -246,14 +354,13 @@ function generateSmartQuestions(jobDetails: any, resumeContent: ParsedResume | n
   ];
 
   // Add role-specific questions based on job title and resume
-  const roleSpecificQuestions = getRoleSpecificQuestions(title, requirements, resumeContent);
+  const roleSpecificQuestions = getRoleSpecificQuestions(title, requirements || '', resumeContent);
   
   return [...baseQuestions, ...roleSpecificQuestions].slice(0, 5); // Return max 5 questions
 }
 
 function getRoleSpecificQuestions(title: string, requirements: string, resumeContent: ParsedResume | null) {
   const titleLower = title.toLowerCase();
-  const requirementsLower = requirements.toLowerCase();
   
   const questions = [];
 
@@ -262,7 +369,7 @@ function getRoleSpecificQuestions(title: string, requirements: string, resumeCon
     if (resumeContent && resumeContent.projects.length > 0) {
       questions.push({
         id: 6,
-        text: `I noticed you worked on ${resumeContent.projects[0].name || 'a software project'}. Can you walk me through the technical challenges you faced and how you solved them?`,
+        text: `I noticed you worked on ${resumeContent.projects[0]?.name || 'a software project'}. Can you walk me through the technical challenges you faced and how you solved them?`,
         category: "Technical"
       });
     } else {

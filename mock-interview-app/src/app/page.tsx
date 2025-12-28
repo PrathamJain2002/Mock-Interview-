@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { Upload, FileText, Briefcase, Play, Mic } from 'lucide-react';
-import Link from 'next/link';
+// import Link from 'next/link'; // Unused import
 import { apiUtils } from '@/config/api';
 
 interface ParsedResume {

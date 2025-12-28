@@ -125,8 +125,21 @@ export default function InterviewPage() {
     try {
       // Call the Express API to generate questions with parsed resume data
       const response = await apiUtils.generateQuestions({
-        parsedResume: interviewData?.parsedResume || null,
-        jobDetails: interviewData?.jobDetails
+        parsedResume: interviewData?.parsedResume || {
+          personalInfo: {},
+          skills: [],
+          experience: [],
+          projects: [],
+          education: [],
+          certifications: [],
+          languages: []
+        },
+        jobDetails: interviewData?.jobDetails || {
+          title: '',
+          company: '',
+          description: '',
+          requirements: ''
+        }
       });
 
       if (!response.ok) {
