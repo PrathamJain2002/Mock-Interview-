@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { Request, Response } from 'express';
 import multer from 'multer';
 import { extractTextFromPDF, parseResumeContent } from '../utils/pdfParser';
 
@@ -10,7 +10,7 @@ const upload = multer({
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB limit
   },
-  fileFilter: (req, file, cb) => {
+  fileFilter: (_req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
     } else {
@@ -20,22 +20,23 @@ const upload = multer({
 });
 
 // POST /api/resume/parse - Parse uploaded PDF resume
-router.post('/parse', upload.single('resume'), async (req, res) => {
+router.post('/parse', upload.single('resume'), async (req: Request, res: Response) => {
   try {
     console.log('Resume parsing API called');
     
-    if (!req.file) {
+    const file = (req as Request & { file?: Express.Multer.File }).file;
+    if (!file) {
       return res.status(400).json({ 
         error: 'No file provided',
         success: false 
       });
     }
 
-    console.log('PDF file received:', req.file.originalname, 'Size:', req.file.size);
+    console.log('PDF file received:', file.originalname, 'Size:', file.size);
 
     // Extract text using pdf-parse
     console.log('Starting PDF text extraction...');
-    const pdfText = await extractTextFromPDF(req.file.buffer);
+    const pdfText = await extractTextFromPDF(file.buffer);
     
     console.log('PDF text extracted successfully, length:', pdfText.length);
 
@@ -62,8 +63,8 @@ router.post('/parse', upload.single('resume'), async (req, res) => {
       success: true,
       rawText: pdfText,
       parsedResume,
-      fileName: req.file.originalname,
-      fileSize: req.file.size
+      fileName: file.originalname,
+      fileSize: file.size
     });
 
   } catch (error) {
@@ -78,7 +79,7 @@ router.post('/parse', upload.single('resume'), async (req, res) => {
 });
 
 // POST /api/resume/manual - Handle manual resume data
-router.post('/manual', async (req, res) => {
+router.post('/manual', async (req: Request, res: Response) => {
   try {
     const { skills, experience, projects, education, personalInfo } = req.body;
     

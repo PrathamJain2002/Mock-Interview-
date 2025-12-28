@@ -4,6 +4,7 @@ console.log('🔍 Backend server file loaded...');
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+// Type definitions are in devDependencies but needed for build
 
 // Load environment variables FIRST, before importing routes
 // This ensures all route files can access process.env variables
