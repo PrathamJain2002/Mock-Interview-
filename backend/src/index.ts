@@ -51,7 +51,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL
   ? normalizeUrl(process.env.FRONTEND_URL)
   : 'http://localhost:3000';
 
-// CORS configuration - handle origins with or without trailing slash
+// CORS configuration - allow Vercel domains (production + preview deployments)
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (mobile apps, Postman, etc.)
@@ -62,16 +62,23 @@ app.use(cors({
     // Normalize the origin (remove trailing slash)
     const normalizedOrigin = normalizeUrl(origin);
     
-    // Check if normalized origin matches allowed frontend URL
-    if (normalizedOrigin === FRONTEND_URL) {
-      return callback(null, true);
-    }
-    
-    // Also allow localhost for development
+    // Allow localhost for development
     if (normalizedOrigin.startsWith('http://localhost:') || normalizedOrigin.startsWith('https://localhost:')) {
       return callback(null, true);
     }
     
+    // Allow all Vercel domains (production and preview deployments)
+    // Vercel URLs end with .vercel.app
+    if (normalizedOrigin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+    
+    // Check if normalized origin matches configured frontend URL
+    if (normalizedOrigin === FRONTEND_URL) {
+      return callback(null, true);
+    }
+    
+    console.warn(`CORS blocked origin: ${normalizedOrigin}`);
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true
